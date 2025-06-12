@@ -47,7 +47,7 @@ func generateAuthString(userID int64, salt string) string {
 	userIDStr := fmt.Sprintf("%d", userID)
 	hash := md5.Sum([]byte(userIDStr + salt))
 	authCode := hex.EncodeToString(hash[:])
-	return fmt.Sprintf("%s:%s", userIDStr, authCode)
+	return fmt.Sprintf("```\n%s:%s\n```", userIDStr, authCode)
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +85,9 @@ func sendTelegramMessage(chatID int64, text string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
 	payload := map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "Markdown",
 	}
 	jsonPayload, _ := json.Marshal(payload)
 
