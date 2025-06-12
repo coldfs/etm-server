@@ -146,6 +146,14 @@ func messageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Write([]byte("ETM - SERVER"))
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -162,11 +170,12 @@ func main() {
 		log.Fatal("SALT is not set")
 	}
 
+	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/webhook", webhookHandler)
 	http.HandleFunc("/message", messageHandler)
 
 	log.Println("Server started on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe(":"+os.Getenv("PORT"), nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
