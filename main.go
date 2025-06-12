@@ -47,7 +47,11 @@ func generateAuthString(userID int64, salt string) string {
 	userIDStr := fmt.Sprintf("%d", userID)
 	hash := md5.Sum([]byte(userIDStr + salt))
 	authCode := hex.EncodeToString(hash[:])
-	return fmt.Sprintf("```\n%s:%s\n```", userIDStr, authCode)
+	return fmt.Sprintf("%s:%s", userIDStr, authCode)
+}
+
+func formatAuthCode(authString string) string {
+	return fmt.Sprintf("Ваш бот-токен:\n```\n%s\n```\n\nВставьте его в настройки приложения ETM", authString)
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -70,11 +74,17 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if update.Message.Text == "/start" {
+	switch update.Message.Text {
+	case "/start", "/auth":
 		userID := update.Message.From.ID
 		chatID := update.Message.Chat.ID
-		responseText := generateAuthString(userID, salt)
+		authString := generateAuthString(userID, salt)
+		responseText := formatAuthCode(authString)
 		go sendTelegramMessage(chatID, responseText)
+	case "/help":
+		chatID := update.Message.Chat.ID
+		helpText := "Чтобы получить свой бот-токен - введите команду /auth\nЭтот код нужно будет ввести в настройках приложения ETM"
+		go sendTelegramMessage(chatID, helpText)
 	}
 
 	w.WriteHeader(http.StatusOK)
