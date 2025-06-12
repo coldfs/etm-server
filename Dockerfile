@@ -24,8 +24,8 @@ COPY --from=builder /app/app .
 # Копируем example.env для примера (реальный .env не коммитим)
 COPY example.env .
 
-# Открываем порт
-EXPOSE 8080
+# Vercel будет предоставлять PORT через переменную окружения
+ENV PORT=8080
 
 # Запуск приложения
 CMD ["./app"] 

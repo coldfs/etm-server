@@ -164,8 +164,15 @@ func main() {
 
 	http.HandleFunc("/webhook", webhookHandler)
 	http.HandleFunc("/message", messageHandler)
-	log.Println("Server started on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+
+	// Получаем порт из переменной окружения или используем 8080 по умолчанию
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Server started on :%s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
