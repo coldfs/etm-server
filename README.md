@@ -6,6 +6,7 @@
 
 ### Telegram Bot
 - Команда `/start` или `/auth` - генерирует уникальный токен для пользователя
+- Команда `/revoke` - отзывает старый токен и генерирует новый
 - Команда `/help` - показывает инструкцию по использованию
 
 ### API Endpoints
@@ -16,8 +17,9 @@
 ## Требования
 
 - Go 1.21 или выше
+- PostgreSQL база данных
 - Telegram Bot Token
-- SALT для генерации токенов
+- SALT для генерации токенов (для обратной совместимости)
 
 ## Установка и запуск
 
@@ -36,8 +38,11 @@ cp .env.dist .env
 ```
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 SALT=your_secret_salt_here
+DATABASE_URL=postgres://user:password@host:port/dbname
 PORT=8080
 ```
+
+Для Heroku переменная `DATABASE_URL` будет автоматически установлена при добавлении Heroku Postgres.
 
 4. Запустите сервер:
 ```bash
@@ -55,23 +60,41 @@ POST /message
 Content-Type: application/json
 
 {
-    "token": "USER_ID:AUTH_CODE",
+    "token": "YOUR_TOKEN_HERE",
     "message": "Текст сообщения"
 }
 ```
 
 Где:
-- `token` - строка вида USER_ID:AUTH_CODE, полученная от бота
+- `token` - токен, полученный от бота (поддерживаются как старые токены формата USER_ID:AUTH_CODE, так и новые случайные токены)
 - `message` - текст сообщения для отправки
 
 ## Безопасность
 
-- Все токены генерируются с использованием SALT
+- Новые токены генерируются случайным образом и хранятся в PostgreSQL
+- Старые токены (формата USER_ID:AUTH_CODE) поддерживаются для обратной совместимости
+- Команда `/revoke` позволяет отозвать скомпрометированный токен
 - Токены проверяются при каждом запросе к API
 
-## Deploy
-- Проект можно as-is деплоить на heroku
-- После деплоя необходимо настроить вебхук для Telegram бота:
+## Deploy на Heroku
+
+1. Добавьте PostgreSQL addon:
+```bash
+heroku addons:create heroku-postgresql:hobby-dev
+```
+
+2. Установите переменные окружения:
+```bash
+heroku config:set TELEGRAM_BOT_TOKEN=your_bot_token
+heroku config:set SALT=your_salt_value
+```
+
+3. Деплой:
+```bash
+git push heroku main
+```
+
+4. После деплоя необходимо настроить вебхук для Telegram бота:
   ```bash
   curl -F "url=https://your-server-url/webhook" https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook
   ```

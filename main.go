@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 // Структуры для парсинга Telegram webhook
@@ -42,12 +45,100 @@ type MessageRequest struct {
 }
 
 var salt string
+var db *sql.DB
+
+func initDB() error {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return fmt.Errorf("DATABASE_URL is not set")
+	}
+
+	var err error
+	db, err = sql.Open("postgres", databaseURL)
+	if err != nil {
+		return err
+	}
+
+	if err = db.Ping(); err != nil {
+		return err
+	}
+
+	// Создаем таблицу если не существует
+	createTableQuery := `
+	CREATE TABLE IF NOT EXISTS user_tokens (
+		user_id BIGINT PRIMARY KEY,
+		token_hash VARCHAR(64) UNIQUE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`
+	
+	_, err = db.Exec(createTableQuery)
+	return err
+}
+
+func generateRandomToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
 
 func generateAuthString(userID int64, salt string) string {
 	userIDStr := fmt.Sprintf("%d", userID)
 	hash := md5.Sum([]byte(userIDStr + salt))
 	authCode := hex.EncodeToString(hash[:])
 	return fmt.Sprintf("%s:%s", userIDStr, authCode)
+}
+
+func saveOrUpdateToken(userID int64, token string) error {
+	query := `
+	INSERT INTO user_tokens (user_id, token_hash) 
+	VALUES ($1, $2) 
+	ON CONFLICT (user_id) 
+	DO UPDATE SET token_hash = EXCLUDED.token_hash, created_at = CURRENT_TIMESTAMP`
+	
+	_, err := db.Exec(query, userID, token)
+	return err
+}
+
+func getTokenByUserID(userID int64) (string, error) {
+	var token string
+	query := `SELECT token_hash FROM user_tokens WHERE user_id = $1`
+	err := db.QueryRow(query, userID).Scan(&token)
+	return token, err
+}
+
+func getUserIDByToken(token string) (int64, error) {
+	var userID int64
+	query := `SELECT user_id FROM user_tokens WHERE token_hash = $1`
+	err := db.QueryRow(query, token).Scan(&userID)
+	return userID, err
+}
+
+func isOldFormatToken(token string) bool {
+	parts := strings.Split(token, ":")
+	return len(parts) == 2
+}
+
+func migrateOldToken(token string) error {
+	parts := strings.Split(token, ":")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid old token format")
+	}
+	
+	var userID int64
+	if _, err := fmt.Sscanf(parts[0], "%d", &userID); err != nil {
+		return err
+	}
+	
+	// Проверяем валидность старого токена
+	expectedToken := generateAuthString(userID, salt)
+	if token != expectedToken {
+		return fmt.Errorf("invalid old token")
+	}
+	
+	// Сохраняем старый токен в БД
+	return saveOrUpdateToken(userID, token)
 }
 
 func formatAuthCode(authString string) string {
@@ -78,12 +169,65 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	case "/start", "/auth":
 		userID := update.Message.From.ID
 		chatID := update.Message.Chat.ID
-		authString := generateAuthString(userID, salt)
-		responseText := formatAuthCode(authString)
+		
+		// Проверяем, есть ли уже токен у пользователя
+		existingToken, err := getTokenByUserID(userID)
+		if err == sql.ErrNoRows {
+			// Новый пользователь - генерируем случайный токен
+			newToken, err := generateRandomToken()
+			if err != nil {
+				log.Printf("Error generating token: %v", err)
+				go sendTelegramMessage(chatID, "Произошла ошибка при генерации токена. Попробуйте позже.")
+				break
+			}
+			
+			if err := saveOrUpdateToken(userID, newToken); err != nil {
+				log.Printf("Error saving token: %v", err)
+				go sendTelegramMessage(chatID, "Произошла ошибка при сохранении токена. Попробуйте позже.")
+				break
+			}
+			
+			responseText := formatAuthCode(newToken)
+			go sendTelegramMessage(chatID, responseText)
+		} else if err != nil {
+			log.Printf("Error getting token: %v", err)
+			go sendTelegramMessage(chatID, "Произошла ошибка. Попробуйте позже.")
+		} else {
+			// Пользователь уже есть - возвращаем существующий токен
+			responseText := formatAuthCode(existingToken)
+			go sendTelegramMessage(chatID, responseText)
+		}
+		
+	case "/revoke":
+		userID := update.Message.From.ID
+		chatID := update.Message.Chat.ID
+		
+		// Генерируем новый токен
+		newToken, err := generateRandomToken()
+		if err != nil {
+			log.Printf("Error generating token: %v", err)
+			go sendTelegramMessage(chatID, "Произошла ошибка при генерации нового токена. Попробуйте позже.")
+			break
+		}
+		
+		// Сохраняем новый токен
+		if err := saveOrUpdateToken(userID, newToken); err != nil {
+			log.Printf("Error saving new token: %v", err)
+			go sendTelegramMessage(chatID, "Произошла ошибка при сохранении нового токена. Попробуйте позже.")
+			break
+		}
+		
+		responseText := fmt.Sprintf("Старый токен отозван.\n\n%s", formatAuthCode(newToken))
 		go sendTelegramMessage(chatID, responseText)
+		
 	case "/help":
 		chatID := update.Message.Chat.ID
-		helpText := "Чтобы получить свой бот-токен - введите команду /auth\nЭтот код нужно будет ввести в настройках приложения ETM"
+		helpText := `Доступные команды:
+/auth - получить ваш бот-токен
+/revoke - отозвать старый токен и получить новый
+/help - показать эту справку
+
+Токен нужно ввести в настройках приложения ETM`
 		go sendTelegramMessage(chatID, helpText)
 	}
 
@@ -125,29 +269,45 @@ func messageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Парсим токен: ожидаем формат USER_ID:AUTH_CODE
-	parts := strings.Split(req.Token, ":")
-	if len(parts) != 2 {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Invalid token format"))
-		return
-	}
-	userIDStr := parts[0]
-	// authCode := parts[1] // больше не используется
-
-	// Проверяем auth_code
 	var userID int64
-	_, err = fmt.Sscanf(userIDStr, "%d", &userID)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Invalid user ID in token"))
-		return
-	}
-	validToken := generateAuthString(userID, salt)
-	if req.Token != validToken {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("Invalid token"))
-		return
+
+	// Проверяем формат токена
+	if isOldFormatToken(req.Token) {
+		// Старый формат USER_ID:AUTH_CODE
+		parts := strings.Split(req.Token, ":")
+		_, err = fmt.Sscanf(parts[0], "%d", &userID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Invalid user ID in token"))
+			return
+		}
+		
+		// Проверяем валидность старого токена
+		expectedToken := generateAuthString(userID, salt)
+		if req.Token != expectedToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("Invalid token"))
+			return
+		}
+		
+		// Мигрируем старый токен в БД для последующего использования
+		if err := migrateOldToken(req.Token); err != nil {
+			log.Printf("Error migrating old token: %v", err)
+		}
+	} else {
+		// Новый формат - случайный токен
+		userID, err = getUserIDByToken(req.Token)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte("Invalid token"))
+			} else {
+				log.Printf("Error checking token: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("Internal server error"))
+			}
+			return
+		}
 	}
 
 	// Отправляем сообщение пользователю
@@ -181,12 +341,25 @@ func main() {
 		log.Fatal("SALT is not set")
 	}
 
+	// Инициализируем подключение к БД
+	if err := initDB(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	log.Println("Database connected successfully")
+
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/webhook", webhookHandler)
 	http.HandleFunc("/message", messageHandler)
 
-	log.Println("Server started on :8080")
-	if err := http.ListenAndServe(":"+os.Getenv("PORT"), nil); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	
+	log.Printf("Server started on :%s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
